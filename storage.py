@@ -2,7 +2,7 @@
 
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 DB_PATH = Path(os.getenv("DB_PATH", Path(__file__).parent / "recordatorios.db"))
@@ -50,6 +50,19 @@ def inicializar_db():
         if "categoria" not in columnas:
             # Compatibilidad con bases creadas antes de agregar categorías.
             conn.execute("ALTER TABLE gastos ADD COLUMN categoria TEXT NOT NULL DEFAULT 'fijo'")
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS logros (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                tipo TEXT NOT NULL,
+                valor INTEGER NOT NULL,
+                fecha TEXT NOT NULL,
+                UNIQUE(chat_id, tipo, valor)
+            )
+            """
+        )
 
 
 def crear_recordatorio(chat_id: int, mensaje: str, fecha_hora: datetime) -> int:
@@ -174,3 +187,60 @@ def eliminar_gastos_por_descripcion_mes(chat_id: int, anio: int, mes: int, texto
             (chat_id, patron_mes, patron_texto),
         )
         return cursor.rowcount
+
+
+def fechas_con_gasto(chat_id: int) -> set[str]:
+    with conectar() as conn:
+        filas = conn.execute(
+            "SELECT DISTINCT fecha FROM gastos WHERE chat_id = ?", (chat_id,)
+        ).fetchall()
+    return {f["fecha"] for f in filas}
+
+
+def racha_actual(chat_id: int) -> int:
+    # Días consecutivos (terminando hoy o ayer) con al menos un gasto anotado.
+    # Si hoy todavía no anotó nada, la racha no se corta todavía: se cuenta desde ayer.
+    fechas = fechas_con_gasto(chat_id)
+    cursor = datetime.now().date()
+    if cursor.isoformat() not in fechas:
+        cursor -= timedelta(days=1)
+
+    racha = 0
+    while cursor.isoformat() in fechas:
+        racha += 1
+        cursor -= timedelta(days=1)
+    return racha
+
+
+def contar_gastos_totales(chat_id: int) -> int:
+    with conectar() as conn:
+        fila = conn.execute(
+            "SELECT COUNT(*) AS total FROM gastos WHERE chat_id = ?", (chat_id,)
+        ).fetchone()
+    return fila["total"]
+
+
+def ya_tiene_logro(chat_id: int, tipo: str, valor: int) -> bool:
+    with conectar() as conn:
+        fila = conn.execute(
+            "SELECT 1 FROM logros WHERE chat_id = ? AND tipo = ? AND valor = ?",
+            (chat_id, tipo, valor),
+        ).fetchone()
+    return fila is not None
+
+
+def registrar_logro(chat_id: int, tipo: str, valor: int) -> bool:
+    # Devuelve True solo si es la primera vez que se desbloquea (para no avisar repetido).
+    with conectar() as conn:
+        cursor = conn.execute(
+            "INSERT OR IGNORE INTO logros (chat_id, tipo, valor, fecha) VALUES (?, ?, ?, ?)",
+            (chat_id, tipo, valor, datetime.now().isoformat()),
+        )
+        return cursor.rowcount > 0
+
+
+def listar_logros(chat_id: int) -> list[sqlite3.Row]:
+    with conectar() as conn:
+        return conn.execute(
+            "SELECT * FROM logros WHERE chat_id = ? ORDER BY tipo, valor", (chat_id,)
+        ).fetchall()

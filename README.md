@@ -65,8 +65,9 @@ te quedes en el nivel gratuito, ej. Fly.io).
 
 ## Alertas de banco (solo lectura)
 
-El bot lee (cada 2 minutos) las notificaciones que Banco Cuscatlán manda por
-correo a Gmail, y te avisa por Telegram cuando detecta:
+El bot vigila en tiempo real (IMAP IDLE, no consultas cada tanto) las
+notificaciones que Banco Cuscatlán manda por correo a Gmail, y te avisa por
+Telegram casi al instante cuando detecta:
 
 - Depósitos recibidos
 - Compras con tarjeta
@@ -88,6 +89,27 @@ Generá la contraseña de aplicación en
 [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords).
 Si tu banco es distinto o cambia el formato de sus correos, el parser de
 [banco.py](banco.py) hay que ajustarlo con un ejemplo real de la notificación.
+
+## Rachas y logros
+
+`/racha` muestra cuántos días seguidos llevás anotando gastos y qué logros
+desbloqueaste. Los logros se avisan solos apenas los cruzás (no hace falta
+pedirlos):
+
+- Racha: 3, 7, 14, 30, 60 y 100 días seguidos
+- Total de gastos registrados: 1, 10, 50, 100 y 500
+
+## Dashboard web (opcional)
+
+Un panel local con gráficos de tus gastos, recordatorios pendientes y logros.
+Corre aparte del bot, en tu propia compu (no se expone a internet):
+
+```bash
+source venv/bin/activate
+python3 dashboard.py
+```
+
+Después abrí [http://127.0.0.1:5050](http://127.0.0.1:5050) en el navegador.
 
 ## Próximos pasos posibles
 

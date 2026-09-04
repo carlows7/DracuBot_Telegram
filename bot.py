@@ -3,11 +3,17 @@
 import asyncio
 import logging
 import os
+import threading
 from datetime import datetime, time
 from html import escape
 
-import requests
 from dotenv import load_dotenv
+
+# Tiene que cargarse ANTES de importar nuestros propios módulos: banco.py lee
+# las variables de entorno (credenciales de Gmail) apenas se importa.
+load_dotenv()
+
+import requests
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
@@ -19,7 +25,7 @@ from telegram.ext import (
 )
 
 import storage
-from banco import buscar_notificaciones_nuevas
+from banco import vigilar_banco
 from frases import obtener_frase_random
 from resumen import buscar_url_wikipedia, extraer_texto_de_url, resumir_texto
 from tiempo import ahora_local, interpretar_recordatorio
@@ -29,14 +35,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 
 # Estructura del menú de 2 niveles: categoría -> lista de comandos.
 CATEGORIAS = {
     "agenda": ("🗓️ AgendaDrac", ["recordar", "lista", "borrar"]),
-    "gastos": ("🩸 OrganizadorGastos", ["gasto", "extra", "gastos", "duplicados", "limpiar", "ahorro"]),
+    "gastos": ("🩸 OrganizadorGastos", ["gasto", "extra", "gastos", "duplicados", "limpiar", "ahorro", "racha"]),
     "resumenes": ("📜 ResumenesDrac", ["resumen"]),
 }
 
@@ -67,6 +72,7 @@ USO_COMANDOS = {
         "ej: /limpiar supermercado"
     ),
     "ahorro": "/ahorro - meta de ahorro sugerida según tu historial",
+    "racha": "/racha - racha de días seguidos anotando gastos y logros desbloqueados",
     "resumen": (
         "/resumen <texto, link o tema> - resume un texto, una página web o busca un tema\n"
         "ej: /resumen la primera guerra mundial"
@@ -74,7 +80,7 @@ USO_COMANDOS = {
 }
 
 # Comandos que no necesitan datos: se ejecutan directo al tocar el botón.
-COMANDOS_SIN_DATOS = {"lista", "gastos", "ahorro", "duplicados"}
+COMANDOS_SIN_DATOS = {"lista", "gastos", "ahorro", "duplicados", "racha"}
 
 # Para los comandos que sí necesitan datos: qué pedirle al usuario que escriba
 # (sin la barra "/", porque la respuesta se manda como mensaje de texto normal).
@@ -316,6 +322,50 @@ async def borrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🦇 No encuentro ese recordatorio en mi cripta.")
 
 
+RACHA_HITOS = [3, 7, 14, 30, 60, 100]
+TOTAL_HITOS = [1, 10, 50, 100, 500]
+
+
+async def _revisar_logros(update: Update, chat_id: int):
+    racha = storage.racha_actual(chat_id)
+    for hito in RACHA_HITOS:
+        if racha >= hito and storage.registrar_logro(chat_id, "racha", hito):
+            await update.message.reply_text(
+                f"🔥 ¡Logro desbloqueado! Llevás {hito} día(s) seguidos anotando gastos."
+            )
+
+    total = storage.contar_gastos_totales(chat_id)
+    for hito in TOTAL_HITOS:
+        if total >= hito and storage.registrar_logro(chat_id, "total", hito):
+            await update.message.reply_text(
+                f"🏆 ¡Logro desbloqueado! Ya registraste {hito} gasto(s) en total."
+            )
+
+
+async def racha(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    dias = storage.racha_actual(chat_id)
+    total = storage.contar_gastos_totales(chat_id)
+
+    lineas = [
+        f"🔥 Racha actual: {dias} día(s) seguidos anotando gastos.",
+        f"📋 Total de gastos registrados: {total}",
+    ]
+
+    logros = storage.listar_logros(chat_id)
+    if logros:
+        lineas.append("\n🏆 Logros desbloqueados:")
+        for l in logros:
+            if l["tipo"] == "racha":
+                lineas.append(f"  🔥 {l['valor']} días seguidos")
+            else:
+                lineas.append(f"  🏆 {l['valor']} gastos registrados")
+    else:
+        lineas.append("\n🦇 Todavía no desbloqueaste ningún logro.")
+
+    await update.message.reply_text("\n".join(lineas))
+
+
 async def _registrar_gasto(update: Update, context: ContextTypes.DEFAULT_TYPE, categoria: str, etiqueta: str):
     if len(context.args) < 2:
         await update.message.reply_text(
@@ -339,6 +389,8 @@ async def _registrar_gasto(update: Update, context: ContextTypes.DEFAULT_TYPE, c
         f"🩸 Anoté ${monto:.2f} en '{descripcion}' ({categoria}).\n"
         f"Llevás ${total_mes:.2f} gastados este mes."
     )
+
+    await _revisar_logros(update, chat_id)
 
 
 async def gasto(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -593,19 +645,12 @@ def _formatear_notificacion(n: dict) -> str:
     return "\n".join(lineas)
 
 
-async def revisar_banco(context: ContextTypes.DEFAULT_TYPE):
-    try:
-        notificaciones = await asyncio.to_thread(buscar_notificaciones_nuevas)
-    except Exception:
-        logger.exception("Error revisando el correo del banco")
-        return
-
-    if not notificaciones:
-        return
-
+async def procesar_notificaciones_banco(bot, notificaciones: list[dict]):
+    # Llamada desde el hilo de vigilancia IMAP IDLE (ver banco.vigilar_banco),
+    # vía asyncio.run_coroutine_threadsafe, apenas llega un correo nuevo del banco.
     for chat_id in storage.listar_chats():
         for n in notificaciones:
-            await context.bot.send_message(chat_id=chat_id, text=_formatear_notificacion(n))
+            await bot.send_message(chat_id=chat_id, text=_formatear_notificacion(n))
 
 
 def reprogramar_pendientes(app: Application):
@@ -640,6 +685,7 @@ def main():
     app.add_handler(CommandHandler("duplicados", duplicados))
     app.add_handler(CommandHandler("limpiar", limpiar))
     app.add_handler(CommandHandler("ahorro", ahorro))
+    app.add_handler(CommandHandler("racha", racha))
     app.add_handler(CommandHandler("resumen", resumen))
     app.add_handler(CallbackQueryHandler(menu_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_respuesta_menu))
@@ -651,7 +697,19 @@ def main():
     app.job_queue.run_daily(
         aviso_nocturno, time=time(hour=22, minute=0, tzinfo=ahora_local().tzinfo)
     )
-    app.job_queue.run_repeating(revisar_banco, interval=120, first=15)
+
+    # IMAP IDLE necesita un loop de asyncio ya creado para poder mandar mensajes
+    # de Telegram desde su hilo aparte (run_polling reutiliza este mismo loop).
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    async def al_llegar_notificacion(notificaciones):
+        await procesar_notificaciones_banco(app.bot, notificaciones)
+
+    hilo_banco = threading.Thread(
+        target=vigilar_banco, args=(al_llegar_notificacion, loop), daemon=True
+    )
+    hilo_banco.start()
 
     logger.info("Bot iniciado, esperando mensajes...")
     app.run_polling()
