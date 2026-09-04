@@ -23,10 +23,24 @@ def inicializar_db():
                 chat_id INTEGER NOT NULL,
                 mensaje TEXT NOT NULL,
                 fecha_hora TEXT NOT NULL,
-                enviado INTEGER NOT NULL DEFAULT 0
+                enviado INTEGER NOT NULL DEFAULT 0,
+                recurrencia TEXT,
+                hora INTEGER,
+                minuto INTEGER,
+                dia_semana INTEGER
             )
             """
         )
+        columnas_rec = [f["name"] for f in conn.execute("PRAGMA table_info(recordatorios)").fetchall()]
+        for columna, ddl in (
+            ("recurrencia", "ALTER TABLE recordatorios ADD COLUMN recurrencia TEXT"),
+            ("hora", "ALTER TABLE recordatorios ADD COLUMN hora INTEGER"),
+            ("minuto", "ALTER TABLE recordatorios ADD COLUMN minuto INTEGER"),
+            ("dia_semana", "ALTER TABLE recordatorios ADD COLUMN dia_semana INTEGER"),
+        ):
+            if columna not in columnas_rec:
+                # Compatibilidad con bases creadas antes de agregar recurrencia.
+                conn.execute(ddl)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS chats (
@@ -74,6 +88,45 @@ def crear_recordatorio(chat_id: int, mensaje: str, fecha_hora: datetime) -> int:
         return cursor.lastrowid
 
 
+def editar_recordatorio(chat_id: int, recordatorio_id: int, mensaje: str, fecha_hora: datetime) -> bool:
+    with conectar() as conn:
+        cursor = conn.execute(
+            "UPDATE recordatorios SET mensaje = ?, fecha_hora = ?, enviado = 0 WHERE id = ? AND chat_id = ?",
+            (mensaje, fecha_hora.isoformat(), recordatorio_id, chat_id),
+        )
+        return cursor.rowcount > 0
+
+
+def crear_recordatorio_recurrente(
+    chat_id: int,
+    mensaje: str,
+    proxima_fecha: datetime,
+    recurrencia: str,
+    hora: int,
+    minuto: int,
+    dia_semana: int | None = None,
+) -> int:
+    with conectar() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO recordatorios
+                (chat_id, mensaje, fecha_hora, recurrencia, hora, minuto, dia_semana)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (chat_id, mensaje, proxima_fecha.isoformat(), recurrencia, hora, minuto, dia_semana),
+        )
+        return cursor.lastrowid
+
+
+def listar_recurrentes() -> list[sqlite3.Row]:
+    # Se usa al arrancar el bot para reprogramar todos los recordatorios que
+    # se repiten (los jobs en memoria del job_queue se pierden al reiniciar).
+    with conectar() as conn:
+        return conn.execute(
+            "SELECT * FROM recordatorios WHERE recurrencia IS NOT NULL"
+        ).fetchall()
+
+
 def listar_pendientes(chat_id: int) -> list[sqlite3.Row]:
     with conectar() as conn:
         return conn.execute(
@@ -83,10 +136,12 @@ def listar_pendientes(chat_id: int) -> list[sqlite3.Row]:
 
 
 def listar_todos_pendientes() -> list[sqlite3.Row]:
-    # Se usa al arrancar el bot para reprogramar los recordatorios que quedaron pendientes.
+    # Se usa al arrancar el bot para reprogramar los recordatorios de una sola
+    # vez que quedaron pendientes. Los recurrentes se reprograman aparte
+    # (ver listar_recurrentes), si no se disparían duplicados.
     with conectar() as conn:
         return conn.execute(
-            "SELECT * FROM recordatorios WHERE enviado = 0 ORDER BY fecha_hora"
+            "SELECT * FROM recordatorios WHERE enviado = 0 AND recurrencia IS NULL ORDER BY fecha_hora"
         ).fetchall()
 
 
@@ -127,6 +182,15 @@ def crear_gasto(
             (chat_id, monto, descripcion, fecha, categoria),
         )
         return cursor.lastrowid
+
+
+def editar_gasto(chat_id: int, gasto_id: int, monto: float, descripcion: str) -> bool:
+    with conectar() as conn:
+        cursor = conn.execute(
+            "UPDATE gastos SET monto = ?, descripcion = ? WHERE id = ? AND chat_id = ?",
+            (monto, descripcion, gasto_id, chat_id),
+        )
+        return cursor.rowcount > 0
 
 
 def gastos_del_mes(chat_id: int, anio: int, mes: int) -> list[sqlite3.Row]:

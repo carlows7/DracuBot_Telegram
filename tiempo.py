@@ -15,6 +15,9 @@ DIAS_SEMANA = {
     "domingo": 6,
 }
 
+# Para mostrarle el nombre "lindo" al usuario a partir del índice (0=lunes).
+NOMBRES_DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+
 UNIDADES = {"minuto": "minutes", "hora": "hours", "dia": "days", "día": "days"}
 
 MESES = {
@@ -75,6 +78,41 @@ _HORA = rf"(\d{{1,2}})(?::(\d{{2}}))?\s*{_CALIF}"
 # Igual que _HORA pero con calificador OBLIGATORIO: sirve para reconocer una
 # hora "suelta" (sin "a las" adelante) sin confundirla con cualquier número.
 _HORA_CON_CALIF = rf"(\d{{1,2}})(?::(\d{{2}}))?\s*({_CALIF_OPCIONES})"
+
+_PATRON_DIARIO = re.compile(
+    rf"^(?:todos\s+los\s+d[ií]as|cada\s+d[ií]a)\s+a\s+las?\s+{_HORA}\s+", re.IGNORECASE
+)
+_PATRON_SEMANAL = re.compile(
+    rf"^(?:todos\s+los|cada)\s+"
+    rf"(lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo)\s+a\s+las?\s+{_HORA}\s+",
+    re.IGNORECASE,
+)
+
+
+def interpretar_recurrente(texto: str) -> tuple[dict | None, str]:
+    """Reconoce recordatorios que se repiten: 'todos los días a las 8 ...' o
+    'todos los lunes a las 9 ...' (también con 'cada' en vez de 'todos los').
+    Devuelve (info, mensaje) donde info tiene tipo ('diario'/'semanal'), hora,
+    minuto y día_semana (solo si es semanal). Si no matchea, info es None."""
+    texto = texto.strip()
+
+    match = _PATRON_DIARIO.match(texto)
+    if match:
+        hora, minuto, calif = match.groups()
+        h, m = _hora_desde_grupos(hora, minuto, calif)
+        mensaje = texto[match.end():].strip()
+        return {"tipo": "diario", "dia_semana": None, "hora": h, "minuto": m}, mensaje
+
+    match = _PATRON_SEMANAL.match(texto)
+    if match:
+        nombre_dia, hora, minuto, calif = match.groups()
+        dia = DIAS_SEMANA[nombre_dia.lower().replace("á", "a").replace("é", "e")]
+        h, m = _hora_desde_grupos(hora, minuto, calif)
+        mensaje = texto[match.end():].strip()
+        return {"tipo": "semanal", "dia_semana": dia, "hora": h, "minuto": m}, mensaje
+
+    return None, texto
+
 
 PATRONES = [
     # "en 10 minutos", "en 2 horas", "en 1 día", "en una hora"

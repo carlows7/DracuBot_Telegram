@@ -5,3 +5,4 @@ __pycache__/
 recordatorios.db
 bot.log
 .DS_Store
+.pytest_cache/

@@ -1,5 +1,8 @@
-"""Lee (solo lectura) las notificaciones del banco que llegan por Gmail
-y las traduce a un formato simple para mandar por Telegram.
+"""Motor genérico de lectura de notificaciones bancarias por Gmail (IMAP).
+
+El parseo de cada banco vive en el paquete bancos/ (un adaptador por banco):
+este módulo solo se encarga de conectarse, vigilar la bandeja con IMAP IDLE,
+y despachar cada correo al adaptador que corresponda según el remitente.
 
 Nunca inicia sesión en la banca en línea ni ejecuta movimientos: solo lee
 correos que el banco ya mandó, usando IMAP con una contraseña de aplicación
@@ -10,21 +13,22 @@ import email
 import imaplib
 import logging
 import os
-import re
 import ssl
 import threading
 import time
 from email.header import decode_header
+from email.utils import parseaddr
 
 import certifi
 from bs4 import BeautifulSoup
 from imapclient import IMAPClient
 
+import bancos
+
 logger = logging.getLogger(__name__)
 
 GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
-REMITENTE_BANCO = os.getenv("REMITENTE_BANCO", "notificaciones@bancocuscatlan.com")
 
 # En algunas instalaciones de Python en macOS (python.org) el contexto SSL por
 # defecto no encuentra los certificados raíz del sistema; usamos el bundle de
@@ -84,80 +88,21 @@ def _cuerpo_texto_plano(mensaje) -> str:
     return texto
 
 
-def _extraer_campo(cuerpo: str, etiqueta: str) -> str | None:
-    # Los correos del banco listan "Etiqueta:" y el valor en la línea siguiente.
-    patron = re.compile(rf"{re.escape(etiqueta)}\s*:?\s*\n\s*(.+)", re.IGNORECASE)
-    match = patron.search(cuerpo)
-    return match.group(1).strip() if match else None
-
-
-def _detectar_tipo(asunto: str, cuerpo: str) -> str:
-    asunto_bajo = asunto.lower()
-    cuerpo_bajo = cuerpo.lower()
-
-    if "retiro" in asunto_bajo:
-        return "retiro_sin_tarjeta"
-    if "inicio de sesión" in asunto_bajo or "inicio de sesion" in asunto_bajo:
-        return "inicio_sesion"
-    if "compra" in asunto_bajo or "consumo con tarjeta" in cuerpo_bajo:
-        return "compra"
-    if "recibido un abono" in cuerpo_bajo:
-        return "deposito_recibido"
-    if "realizado una transferencia" in cuerpo_bajo or "envió una transferencia" in cuerpo_bajo:
-        return "transferencia_enviada"
-    return "otro"
-
-
-def parsear_notificacion(asunto: str, cuerpo: str) -> dict:
-    tipo = _detectar_tipo(asunto, cuerpo)
-    base = {"tipo": tipo, "asunto": asunto, "crudo": cuerpo.strip()[:500]}
-
-    if tipo == "deposito_recibido":
-        base.update(
-            monto=_extraer_campo(cuerpo, "Monto"),
-            banco_contraparte=_extraer_campo(cuerpo, "Banco origen"),
-            contraparte=_extraer_campo(cuerpo, "Originado por"),
-            fecha_hora=_extraer_campo(cuerpo, "Fecha y hora"),
-            referencia=_extraer_campo(cuerpo, "No Referencia"),
-        )
-    elif tipo == "transferencia_enviada":
-        base.update(
-            monto=_extraer_campo(cuerpo, "Monto"),
-            banco_contraparte=_extraer_campo(cuerpo, "Banco destino"),
-            contraparte=_extraer_campo(cuerpo, "Originado por"),
-            fecha_hora=_extraer_campo(cuerpo, "Fecha y hora"),
-            referencia=_extraer_campo(cuerpo, "No Referencia"),
-        )
-    elif tipo == "compra":
-        # Este correo viene en prosa, no en tabla de "Etiqueta: Valor".
-        monto = re.search(r"por\s+(USD\s?[\d,.]+)", cuerpo, re.IGNORECASE)
-        fecha = re.search(r"el\s+d[ií]a\s+([\d/-]+[^\n.]*\d)", cuerpo, re.IGNORECASE)
-        cuenta = re.search(r"cuenta\s+([A-Z0-9]+)", cuerpo, re.IGNORECASE)
-        base.update(
-            monto=monto.group(1) if monto else None,
-            fecha_hora=fecha.group(1) if fecha else None,
-            cuenta=cuenta.group(1) if cuenta else None,
-        )
-    elif tipo == "retiro_sin_tarjeta":
-        base.update(
-            codigo_retiro=_extraer_campo(cuerpo, "Código de retiro"),
-            vigencia=_extraer_campo(cuerpo, "Vigencia de código"),
-            fecha_hora=_extraer_campo(cuerpo, "Fecha y hora"),
-        )
-    elif tipo == "inicio_sesion":
-        base.update(
-            fecha_hora=_extraer_campo(cuerpo, "Fecha de inicio"),
-            ip=_extraer_campo(cuerpo, "Dirección IP"),
-            navegador=_extraer_campo(cuerpo, "Información del navegador"),
-        )
-
-    return base
+def _criterio_busqueda() -> str:
+    # Arma "OR FROM a OR FROM b FROM c" para que el IMAP filtre en el servidor
+    # solo los correos de los bancos registrados (nunca toca el resto del inbox).
+    remitentes = bancos.todos_los_remitentes()
+    criterio = f'FROM "{remitentes[0]}"'
+    for remitente in remitentes[1:]:
+        criterio = f'OR {criterio} FROM "{remitente}"'
+    return f"(UNSEEN {criterio})"
 
 
 def buscar_notificaciones_nuevas() -> list[dict]:
-    """Busca correos no leídos del banco, los parsea y los marca como leídos.
-    Devuelve una lista de notificaciones parseadas (puede estar vacía)."""
-    if not GMAIL_ADDRESS or not GMAIL_APP_PASSWORD:
+    """Busca correos no leídos de cualquier banco registrado, los parsea con
+    el adaptador que corresponda y los marca como leídos. Devuelve una lista
+    de notificaciones parseadas (puede estar vacía)."""
+    if not GMAIL_ADDRESS or not GMAIL_APP_PASSWORD or not bancos.todos_los_remitentes():
         return []
 
     notificaciones = []
@@ -166,15 +111,20 @@ def buscar_notificaciones_nuevas() -> list[dict]:
         conexion.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
         conexion.select("INBOX")
 
-        _, datos = conexion.search(None, f'(UNSEEN FROM "{REMITENTE_BANCO}")')
+        _, datos = conexion.search(None, _criterio_busqueda())
         ids = datos[0].split()
 
         for id_correo in ids:
             _, datos_msj = conexion.fetch(id_correo, "(RFC822)")
             mensaje = email.message_from_bytes(datos_msj[0][1])
-            asunto = _decodificar(mensaje.get("Subject"))
-            cuerpo = _cuerpo_texto_plano(mensaje)
-            notificaciones.append(parsear_notificacion(asunto, cuerpo))
+
+            _, direccion = parseaddr(mensaje.get("From", ""))
+            adaptador = bancos.adaptador_para(direccion)
+            if adaptador is not None:
+                asunto = _decodificar(mensaje.get("Subject"))
+                cuerpo = _cuerpo_texto_plano(mensaje)
+                notificaciones.append(adaptador.parsear(asunto, cuerpo))
+
             conexion.store(id_correo, "+FLAGS", "\\Seen")
     finally:
         try:

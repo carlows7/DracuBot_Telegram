@@ -28,7 +28,7 @@ import storage
 from banco import vigilar_banco
 from frases import obtener_frase_random
 from resumen import buscar_url_wikipedia, extraer_texto_de_url, resumir_texto
-from tiempo import ahora_local, interpretar_recordatorio
+from tiempo import NOMBRES_DIAS, ahora_local, interpretar_recordatorio, interpretar_recurrente
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -40,8 +40,8 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 # Estructura del menú de 2 niveles: categoría -> lista de comandos.
 CATEGORIAS = {
-    "agenda": ("🗓️ AgendaDrac", ["recordar", "lista", "borrar"]),
-    "gastos": ("🩸 OrganizadorGastos", ["gasto", "extra", "gastos", "duplicados", "limpiar", "ahorro", "racha"]),
+    "agenda": ("🗓️ AgendaDrac", ["recordar", "lista", "borrar", "editar"]),
+    "gastos": ("🩸 OrganizadorGastos", ["gasto", "extra", "gastos", "duplicados", "limpiar", "ahorro", "racha", "editar"]),
     "resumenes": ("📜 ResumenesDrac", ["resumen"]),
 }
 
@@ -55,10 +55,18 @@ USO_COMANDOS = {
         "ej: /recordar el viernes a las 18 reunión\n"
         "ej: /recordar 13 de octubre caminata por Michoacán\n"
         "ej: /agenda 8pm gimnasio hoy\n"
-        "ej: /agenda 1 de la tarde almuerzo mañana"
+        "ej: /agenda 1 de la tarde almuerzo mañana\n"
+        "ej: /recordar todos los días a las 8 tomar la pastilla (recurrente)\n"
+        "ej: /recordar todos los lunes a las 9 reunión de equipo (recurrente)"
     ),
     "lista": "/lista - revela tus recordatorios pendientes",
     "borrar": "/borrar <id> - destierra un recordatorio",
+    "editar": (
+        "/editar <recordatorio|gasto> <id> <datos nuevos> - reescribe uno existente\n"
+        "ej: /editar recordatorio 3 mañana a las 5 llamar al banco\n"
+        "ej: /editar gasto 2 300 supermercado\n"
+        "(el id de un gasto aparece en /gastos, el de un recordatorio en /lista)"
+    ),
     "gasto": (
         "/gasto <monto> <descripción> - anota un gasto fijo (agenda semanal)\n"
         "ej: /gasto 500 supermercado"
@@ -95,9 +103,16 @@ PEDIDO_DATOS = {
         "ej: el viernes a las 18 reunión\n"
         "ej: 13 de octubre caminata por Michoacán\n"
         "ej: 8pm gimnasio hoy\n"
-        "ej: 1 de la tarde almuerzo mañana"
+        "ej: 1 de la tarde almuerzo mañana\n"
+        "ej: todos los días a las 8 tomar la pastilla (recurrente)\n"
+        "ej: todos los lunes a las 9 reunión de equipo (recurrente)"
     ),
     "borrar": "✍️ Escribime el id del recordatorio a borrar\nej: 3",
+    "editar": (
+        "✍️ Escribime: <recordatorio|gasto> <id> <datos nuevos>\n"
+        "ej: recordatorio 3 mañana a las 5 llamar al banco\n"
+        "ej: gasto 2 300 supermercado"
+    ),
     "gasto": "✍️ Escribime <monto> <descripción>\nej: 500 supermercado",
     "extra": "✍️ Escribime <monto> <descripción>\nej: 200 arreglo del auto",
     "limpiar": "✍️ Escribime la descripción a borrar de este mes\nej: supermercado",
@@ -252,6 +267,42 @@ def programar_job(app: Application, recordatorio_id: int, chat_id: int, mensaje:
     )
 
 
+async def enviar_recordatorio_recurrente(context: ContextTypes.DEFAULT_TYPE):
+    job = context.job
+    chat_id, mensaje = job.data["chat_id"], job.data["mensaje"]
+    # No se marca "enviado": un recordatorio recurrente se sigue disparando.
+    await context.bot.send_message(chat_id=chat_id, text=f"🔁🧛 {mensaje}")
+
+
+def programar_job_recurrente(
+    app: Application, recordatorio_id: int, chat_id: int, mensaje: str,
+    hora: int, minuto: int, dia_semana: int | None,
+):
+    dias = (dia_semana,) if dia_semana is not None else tuple(range(7))
+    app.job_queue.run_daily(
+        enviar_recordatorio_recurrente,
+        time=time(hour=hora, minute=minuto, tzinfo=ahora_local().tzinfo),
+        days=dias,
+        data={"id": recordatorio_id, "chat_id": chat_id, "mensaje": mensaje},
+        name=str(recordatorio_id),
+    )
+
+
+def _proxima_ocurrencia(hora: int, minuto: int, dia_semana: int | None) -> datetime:
+    ahora = ahora_local()
+    if dia_semana is None:
+        fecha = ahora.replace(hour=hora, minute=minuto, second=0, microsecond=0)
+        if fecha <= ahora:
+            fecha += timedelta(days=1)
+        return fecha
+
+    dias_hasta = (dia_semana - ahora.weekday()) % 7
+    fecha = (ahora + timedelta(days=dias_hasta)).replace(hour=hora, minute=minuto, second=0, microsecond=0)
+    if fecha <= ahora:
+        fecha += timedelta(days=7)
+    return fecha
+
+
 async def recordar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
@@ -262,11 +313,42 @@ async def recordar(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "ej: /recordar hoy a las 20:30 tomar la pastilla\n"
             "ej: /recordar 13 de octubre caminata por Michoacán\n"
             "ej: /agenda 8pm gimnasio hoy\n"
-            "ej: /agenda 1 de la tarde almuerzo mañana"
+            "ej: /agenda 1 de la tarde almuerzo mañana\n"
+            "ej: /recordar todos los días a las 8 tomar la pastilla\n"
+            "ej: /recordar todos los lunes a las 9 reunión de equipo"
         )
         return
 
     texto = " ".join(context.args)
+    chat_id = update.effective_chat.id
+
+    info_recurrente, mensaje_recurrente = interpretar_recurrente(texto)
+    if info_recurrente is not None:
+        if not mensaje_recurrente:
+            await update.message.reply_text("🦇 Falta el mensaje del recordatorio, chuladaaaa.")
+            return
+
+        proxima = _proxima_ocurrencia(info_recurrente["hora"], info_recurrente["minuto"], info_recurrente["dia_semana"])
+        recordatorio_id = storage.crear_recordatorio_recurrente(
+            chat_id, mensaje_recurrente, proxima, info_recurrente["tipo"],
+            info_recurrente["hora"], info_recurrente["minuto"], info_recurrente["dia_semana"],
+        )
+        programar_job_recurrente(
+            context.application, recordatorio_id, chat_id, mensaje_recurrente,
+            info_recurrente["hora"], info_recurrente["minuto"], info_recurrente["dia_semana"],
+        )
+
+        if info_recurrente["tipo"] == "diario":
+            descripcion = f"todos los días a las {info_recurrente['hora']:02d}:{info_recurrente['minuto']:02d}"
+        else:
+            nombre_dia = NOMBRES_DIAS[info_recurrente["dia_semana"]]
+            descripcion = f"todos los {nombre_dia} a las {info_recurrente['hora']:02d}:{info_recurrente['minuto']:02d}"
+
+        await update.message.reply_text(
+            f"🔁🧛 Recordatorio recurrente creado: {descripcion} (id {recordatorio_id})."
+        )
+        return
+
     fecha, mensaje = interpretar_recordatorio(texto)
 
     if fecha is None:
@@ -275,7 +357,8 @@ async def recordar(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "'mañana a las 3 llamar al banco'\n"
             "'en 10 minutos sacar la comida'\n"
             "'el viernes a las 18 reunión'\n"
-            "'13 de octubre caminata por Michoacán'"
+            "'13 de octubre caminata por Michoacán'\n"
+            "'todos los días a las 8 tomar la pastilla'"
         )
         return
 
@@ -283,7 +366,6 @@ async def recordar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🦇 Falta el mensaje del recordatorio, chuladaaaa.")
         return
 
-    chat_id = update.effective_chat.id
     recordatorio_id = storage.crear_recordatorio(chat_id, mensaje, fecha)
     programar_job(context.application, recordatorio_id, chat_id, mensaje, fecha)
 
@@ -300,10 +382,15 @@ async def lista(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     lineas = ["🧛 Esto es lo que aguarda en las sombras:"]
-    lineas += [
-        f"#{r['id']} - {datetime.fromisoformat(r['fecha_hora']).strftime('%d/%m/%Y %H:%M')} - {r['mensaje']}"
-        for r in pendientes
-    ]
+    for r in pendientes:
+        if r["recurrencia"] == "diario":
+            cuando = f"🔁 todos los días a las {r['hora']:02d}:{r['minuto']:02d}"
+        elif r["recurrencia"] == "semanal":
+            cuando = f"🔁 todos los {NOMBRES_DIAS[r['dia_semana']]} a las {r['hora']:02d}:{r['minuto']:02d}"
+        else:
+            cuando = datetime.fromisoformat(r["fecha_hora"]).strftime("%d/%m/%Y %H:%M")
+        lineas.append(f"#{r['id']} - {cuando} - {r['mensaje']}")
+
     await update.message.reply_text("\n".join(lineas))
 
 
@@ -326,6 +413,71 @@ async def borrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🧛 El recordatorio #{recordatorio_id} se ha desvanecido en la niebla.")
     else:
         await update.message.reply_text("🦇 No encuentro ese recordatorio en mi cripta.")
+
+
+async def editar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 2 or context.args[0].lower() not in ("recordatorio", "gasto"):
+        await update.message.reply_text(
+            "Uso: /editar <recordatorio|gasto> <id> <datos nuevos>\n"
+            "ej: /editar recordatorio 3 mañana a las 5 llamar al banco\n"
+            "ej: /editar gasto 2 300 supermercado"
+        )
+        return
+
+    tipo = context.args[0].lower()
+    try:
+        objetivo_id = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("🦇 El id tiene que ser un número, chuladaaaa.")
+        return
+
+    resto = context.args[2:]
+    chat_id = update.effective_chat.id
+
+    if tipo == "recordatorio":
+        if not resto:
+            await update.message.reply_text(
+                "Uso: /editar recordatorio <id> <cuándo> <mensaje>\n"
+                "ej: /editar recordatorio 3 mañana a las 5 llamar al banco"
+            )
+            return
+
+        fecha, mensaje = interpretar_recordatorio(" ".join(resto))
+        if fecha is None:
+            await update.message.reply_text("🦇 No entendí cuándo, chuladaaaa.")
+            return
+        if not mensaje:
+            await update.message.reply_text("🦇 Falta el mensaje del recordatorio, chuladaaaa.")
+            return
+
+        if storage.editar_recordatorio(chat_id, objetivo_id, mensaje, fecha):
+            for job in context.application.job_queue.get_jobs_by_name(str(objetivo_id)):
+                job.schedule_removal()
+            programar_job(context.application, objetivo_id, chat_id, mensaje, fecha)
+            await update.message.reply_text(
+                f"🧛 Recordatorio #{objetivo_id} reescrito: {fecha.strftime('%d/%m/%Y %H:%M')} — {mensaje}"
+            )
+        else:
+            await update.message.reply_text(f"🦇 No encuentro el recordatorio #{objetivo_id}.")
+
+    else:  # tipo == "gasto"
+        if len(resto) < 2:
+            await update.message.reply_text(
+                "Uso: /editar gasto <id> <monto> <descripción>\nej: /editar gasto 2 300 supermercado"
+            )
+            return
+
+        try:
+            monto = float(resto[0].replace(",", "."))
+        except ValueError:
+            await update.message.reply_text("🦇 El monto tiene que ser un número, chuladaaaa.")
+            return
+
+        descripcion = " ".join(resto[1:])
+        if storage.editar_gasto(chat_id, objetivo_id, monto, descripcion):
+            await update.message.reply_text(f"🩸 Gasto #{objetivo_id} reescrito: ${monto:.2f} — {descripcion}")
+        else:
+            await update.message.reply_text(f"🦇 No encuentro el gasto #{objetivo_id}.")
 
 
 RACHA_HITOS = [3, 7, 14, 30, 60, 100]
@@ -412,7 +564,8 @@ def _bloque_categoria(titulo: str, gastos: list) -> list[str]:
         return []
     lineas = [f"\n{titulo}"]
     lineas += [
-        f"  • {g['fecha']}  ${g['monto']:>8.2f}  {escape(g['descripcion'])}" for g in gastos
+        f"  #{g['id']} · {g['fecha']}  ${g['monto']:>8.2f}  {escape(g['descripcion'])}"
+        for g in gastos
     ]
     subtotal = sum(g["monto"] for g in gastos)
     lineas.append(f"  <i>Subtotal: ${subtotal:.2f}</i>")
@@ -606,7 +759,10 @@ TITULOS_MOVIMIENTO = {
 
 def _formatear_notificacion(n: dict) -> str:
     tipo = n["tipo"]
-    lineas = [TITULOS_MOVIMIENTO.get(tipo, TITULOS_MOVIMIENTO["otro"])]
+    titulo = TITULOS_MOVIMIENTO.get(tipo, TITULOS_MOVIMIENTO["otro"])
+    if n.get("banco"):
+        titulo += f" — {n['banco']}"
+    lineas = [titulo]
 
     if tipo in ("deposito_recibido", "transferencia_enviada"):
         if n.get("monto"):
@@ -672,6 +828,15 @@ def reprogramar_pendientes(app: Application):
         programar_job(app, r["id"], r["chat_id"], r["mensaje"], fecha)
 
 
+def reprogramar_recurrentes(app: Application):
+    # Igual que reprogramar_pendientes, pero para los que se repiten
+    # (diarios o semanales): también se pierden del job_queue al reiniciar.
+    for r in storage.listar_recurrentes():
+        programar_job_recurrente(
+            app, r["id"], r["chat_id"], r["mensaje"], r["hora"], r["minuto"], r["dia_semana"]
+        )
+
+
 def main():
     if not TOKEN:
         raise SystemExit(
@@ -686,6 +851,7 @@ def main():
     app.add_handler(CommandHandler("agenda", recordar))  # alias de /recordar
     app.add_handler(CommandHandler("lista", lista))
     app.add_handler(CommandHandler("borrar", borrar))
+    app.add_handler(CommandHandler("editar", editar))
     app.add_handler(CommandHandler("gasto", gasto))
     app.add_handler(CommandHandler("extra", extra))
     app.add_handler(CommandHandler("gastos", gastos))
@@ -698,6 +864,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_respuesta_menu))
 
     reprogramar_pendientes(app)
+    reprogramar_recurrentes(app)
     app.job_queue.run_daily(
         resumen_matutino, time=time(hour=8, minute=0, tzinfo=ahora_local().tzinfo)
     )
