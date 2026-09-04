@@ -837,15 +837,10 @@ def reprogramar_recurrentes(app: Application):
         )
 
 
-def main():
-    if not TOKEN:
-        raise SystemExit(
-            "Falta TELEGRAM_BOT_TOKEN. Copiá .env.example a .env y completá tu token de BotFather."
-        )
-
-    storage.inicializar_db()
-
-    app = Application.builder().token(TOKEN).build()
+def registrar_handlers(app: Application):
+    """Registra todos los comandos del bot. La usan tanto main() (bot siempre
+    corriendo, con job_queue e IDLE) como poll_once.py (una sola pasada,
+    para correr en GitHub Actions sin depender de la Mac)."""
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("recordar", recordar))
     app.add_handler(CommandHandler("agenda", recordar))  # alias de /recordar
@@ -862,6 +857,18 @@ def main():
     app.add_handler(CommandHandler("resumen", resumen))
     app.add_handler(CallbackQueryHandler(menu_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_respuesta_menu))
+
+
+def main():
+    if not TOKEN:
+        raise SystemExit(
+            "Falta TELEGRAM_BOT_TOKEN. Copiá .env.example a .env y completá tu token de BotFather."
+        )
+
+    storage.inicializar_db()
+
+    app = Application.builder().token(TOKEN).build()
+    registrar_handlers(app)
 
     reprogramar_pendientes(app)
     reprogramar_recurrentes(app)

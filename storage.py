@@ -37,6 +37,7 @@ def inicializar_db():
             ("hora", "ALTER TABLE recordatorios ADD COLUMN hora INTEGER"),
             ("minuto", "ALTER TABLE recordatorios ADD COLUMN minuto INTEGER"),
             ("dia_semana", "ALTER TABLE recordatorios ADD COLUMN dia_semana INTEGER"),
+            ("ultimo_envio", "ALTER TABLE recordatorios ADD COLUMN ultimo_envio TEXT"),
         ):
             if columna not in columnas_rec:
                 # Compatibilidad con bases creadas antes de agregar recurrencia.
@@ -45,6 +46,23 @@ def inicializar_db():
             """
             CREATE TABLE IF NOT EXISTS chats (
                 chat_id INTEGER PRIMARY KEY
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS estado (
+                clave TEXT PRIMARY KEY,
+                valor TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS eventos_diarios (
+                evento TEXT NOT NULL,
+                fecha TEXT NOT NULL,
+                UNIQUE(evento, fecha)
             )
             """
         )
@@ -308,3 +326,69 @@ def listar_logros(chat_id: int) -> list[sqlite3.Row]:
         return conn.execute(
             "SELECT * FROM logros WHERE chat_id = ? ORDER BY tipo, valor", (chat_id,)
         ).fetchall()
+
+
+# ---------------------------------------------------------------------------
+# Funciones para el modo "una sola pasada" (GitHub Actions): en vez de un
+# job_queue siempre corriendo, cada corrida revisa qué está pendiente y sale.
+
+def obtener_offset_telegram() -> int | None:
+    with conectar() as conn:
+        fila = conn.execute("SELECT valor FROM estado WHERE clave = 'offset_telegram'").fetchone()
+    return int(fila["valor"]) if fila else None
+
+
+def guardar_offset_telegram(offset: int):
+    with conectar() as conn:
+        conn.execute(
+            "INSERT INTO estado (clave, valor) VALUES ('offset_telegram', ?) "
+            "ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor",
+            (str(offset),),
+        )
+
+
+def recordatorios_vencidos(ahora: datetime) -> list[sqlite3.Row]:
+    # Recordatorios de una sola vez cuya hora ya llegó y todavía no se mandaron.
+    with conectar() as conn:
+        return conn.execute(
+            "SELECT * FROM recordatorios WHERE recurrencia IS NULL AND enviado = 0 AND fecha_hora <= ?",
+            (ahora.isoformat(),),
+        ).fetchall()
+
+
+def recurrentes_pendientes(ahora: datetime) -> list[sqlite3.Row]:
+    # Recurrentes cuya hora de hoy (o de este día de la semana) ya llegó y
+    # todavía no se mandaron en esta ocasión (columna ultimo_envio).
+    hoy = ahora.date().isoformat()
+    hhmm_ahora = ahora.hour * 60 + ahora.minute
+    resultado = []
+    with conectar() as conn:
+        for r in conn.execute("SELECT * FROM recordatorios WHERE recurrencia IS NOT NULL").fetchall():
+            if r["ultimo_envio"] == hoy:
+                continue
+            if r["recurrencia"] == "semanal" and r["dia_semana"] != ahora.weekday():
+                continue
+            hhmm_programado = r["hora"] * 60 + r["minuto"]
+            if hhmm_programado <= hhmm_ahora:
+                resultado.append(r)
+    return resultado
+
+
+def marcar_ultimo_envio(recordatorio_id: int, fecha: str):
+    with conectar() as conn:
+        conn.execute("UPDATE recordatorios SET ultimo_envio = ? WHERE id = ?", (fecha, recordatorio_id))
+
+
+def ya_se_mando_hoy(evento: str, fecha: str) -> bool:
+    with conectar() as conn:
+        fila = conn.execute(
+            "SELECT 1 FROM eventos_diarios WHERE evento = ? AND fecha = ?", (evento, fecha)
+        ).fetchone()
+    return fila is not None
+
+
+def marcar_enviado_hoy(evento: str, fecha: str):
+    with conectar() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO eventos_diarios (evento, fecha) VALUES (?, ?)", (evento, fecha)
+        )

@@ -1,0 +1,54 @@
+name: bot-poll
+
+# GitHub avisa que los horarios programados pueden demorarse o incluso
+# saltarse una corrida en momentos de mucha carga en su plataforma — esto
+# no es un cron confiable al segundo, es "lo más seguido que se puede sin
+# pagar por un servidor".
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {} # para poder probarlo manualmente desde GitHub
+
+# Evita que dos corridas se pisen si una se atrasa y se solapa con la
+# siguiente (guardan y suben la misma base de datos).
+concurrency:
+  group: bot-poll
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout del código del bot
+        uses: actions/checkout@v4
+
+      - name: Checkout de los datos (repo privado aparte)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.DATOS_REPO }}
+          token: ${{ secrets.DATOS_REPO_TOKEN }}
+          path: datos
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Correr una pasada del bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          DB_PATH: ${{ github.workspace }}/datos/recordatorios.db
+        run: python3 poll_once.py
+
+      - name: Guardar los datos actualizados
+        working-directory: datos
+        run: |
+          git config user.name "DracuBot"
+          git config user.email "dracubot@users.noreply.github.com"
+          git add recordatorios.db
+          git diff --cached --quiet || git commit -m "Actualización automática $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push

@@ -82,3 +82,40 @@ def test_racha_y_logros():
     assert storage.registrar_logro(CHAT, "racha", 3) is True
     assert storage.registrar_logro(CHAT, "racha", 3) is False  # no duplica el aviso
     assert storage.ya_tiene_logro(CHAT, "racha", 3) is True
+
+
+def test_offset_telegram_se_guarda_y_actualiza():
+    assert storage.obtener_offset_telegram() is None
+    storage.guardar_offset_telegram(123)
+    assert storage.obtener_offset_telegram() == 123
+    storage.guardar_offset_telegram(456)
+    assert storage.obtener_offset_telegram() == 456
+
+
+def test_recordatorios_vencidos_solo_trae_los_que_ya_llegaron():
+    ahora = ahora_local()
+    storage.crear_recordatorio(CHAT, "ya pasó", ahora - timedelta(minutes=5))
+    storage.crear_recordatorio(CHAT, "todavía no", ahora + timedelta(hours=1))
+
+    vencidos = storage.recordatorios_vencidos(ahora)
+    assert len(vencidos) == 1
+    assert vencidos[0]["mensaje"] == "ya pasó"
+
+
+def test_recurrentes_pendientes_respeta_ultimo_envio():
+    ahora = ahora_local()
+    hora_pasada = ahora - timedelta(minutes=10)
+    rid = storage.crear_recordatorio_recurrente(
+        CHAT, "pastilla", ahora, "diario", hora_pasada.hour, hora_pasada.minute
+    )
+
+    assert len(storage.recurrentes_pendientes(ahora)) == 1
+
+    storage.marcar_ultimo_envio(rid, ahora.date().isoformat())
+    assert storage.recurrentes_pendientes(ahora) == []
+
+
+def test_eventos_diarios_no_se_repiten():
+    assert storage.ya_se_mando_hoy("resumen_matutino", "2026-09-04") is False
+    storage.marcar_enviado_hoy("resumen_matutino", "2026-09-04")
+    assert storage.ya_se_mando_hoy("resumen_matutino", "2026-09-04") is True
