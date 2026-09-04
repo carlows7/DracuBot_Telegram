@@ -1,5 +1,6 @@
 """Bot de Telegram para recordatorios y agenda personal (openclawT)."""
 
+import asyncio
 import logging
 import os
 from datetime import datetime, time
@@ -18,6 +19,7 @@ from telegram.ext import (
 )
 
 import storage
+from banco import buscar_notificaciones_nuevas
 from frases import obtener_frase_random
 from resumen import buscar_url_wikipedia, extraer_texto_de_url, resumir_texto
 from tiempo import ahora_local, interpretar_recordatorio
@@ -534,6 +536,78 @@ async def aviso_nocturno(context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=chat_id, text="\n".join(lineas))
 
 
+TITULOS_MOVIMIENTO = {
+    "deposito_recibido": "🩸 Depósito recibido",
+    "transferencia_enviada": "🩸 Transferencia enviada",
+    "compra": "🛒 Compra con tarjeta",
+    "retiro_sin_tarjeta": "🏧 Código de retiro sin tarjeta",
+    "inicio_sesion": "🔓 Inicio de sesión en tu banca",
+    "otro": "🦇 Movimiento bancario",
+}
+
+
+def _formatear_notificacion(n: dict) -> str:
+    tipo = n["tipo"]
+    lineas = [TITULOS_MOVIMIENTO.get(tipo, TITULOS_MOVIMIENTO["otro"])]
+
+    if tipo in ("deposito_recibido", "transferencia_enviada"):
+        if n.get("monto"):
+            lineas.append(f"Monto: {n['monto']}")
+        if n.get("contraparte"):
+            lineas.append(f"Con: {n['contraparte']}")
+        if n.get("banco_contraparte"):
+            lineas.append(f"Banco: {n['banco_contraparte']}")
+        if n.get("fecha_hora"):
+            lineas.append(f"Fecha: {n['fecha_hora']}")
+        if n.get("referencia"):
+            lineas.append(f"Referencia: {n['referencia']}")
+
+    elif tipo == "compra":
+        if n.get("monto"):
+            lineas.append(f"Monto: {n['monto']}")
+        if n.get("cuenta"):
+            lineas.append(f"Cuenta: {n['cuenta']}")
+        if n.get("fecha_hora"):
+            lineas.append(f"Fecha: {n['fecha_hora']}")
+
+    elif tipo == "retiro_sin_tarjeta":
+        if n.get("codigo_retiro"):
+            lineas.append(f"Código: {n['codigo_retiro']}")
+        if n.get("vigencia"):
+            lineas.append(f"Vigencia: {n['vigencia']}")
+        if n.get("fecha_hora"):
+            lineas.append(f"Fecha: {n['fecha_hora']}")
+
+    elif tipo == "inicio_sesion":
+        if n.get("fecha_hora"):
+            lineas.append(f"Fecha: {n['fecha_hora']}")
+        if n.get("ip"):
+            lineas.append(f"IP: {n['ip']}")
+        if n.get("navegador"):
+            lineas.append(f"Dispositivo: {n['navegador']}")
+
+    else:
+        # Formato no reconocido todavía: mandamos un fragmento crudo para no perder la info.
+        lineas.append(f"\n{n['crudo']}")
+
+    return "\n".join(lineas)
+
+
+async def revisar_banco(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        notificaciones = await asyncio.to_thread(buscar_notificaciones_nuevas)
+    except Exception:
+        logger.exception("Error revisando el correo del banco")
+        return
+
+    if not notificaciones:
+        return
+
+    for chat_id in storage.listar_chats():
+        for n in notificaciones:
+            await context.bot.send_message(chat_id=chat_id, text=_formatear_notificacion(n))
+
+
 def reprogramar_pendientes(app: Application):
     # Al reiniciar el bot, los jobs en memoria se pierden: hay que recrearlos desde la DB.
     ahora = ahora_local()
@@ -577,6 +651,7 @@ def main():
     app.job_queue.run_daily(
         aviso_nocturno, time=time(hour=22, minute=0, tzinfo=ahora_local().tzinfo)
     )
+    app.job_queue.run_repeating(revisar_banco, interval=120, first=15)
 
     logger.info("Bot iniciado, esperando mensajes...")
     app.run_polling()

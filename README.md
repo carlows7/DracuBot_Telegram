@@ -63,6 +63,32 @@ Como sigue corriendo en tu Mac, solo funciona mientras la compu esté prendida
 de tu compu hace falta un servidor en la nube (la mayoría pide tarjeta aunque
 te quedes en el nivel gratuito, ej. Fly.io).
 
+## Alertas de banco (solo lectura)
+
+El bot lee (cada 2 minutos) las notificaciones que Banco Cuscatlán manda por
+correo a Gmail, y te avisa por Telegram cuando detecta:
+
+- Depósitos recibidos
+- Compras con tarjeta
+- Códigos de retiro sin tarjeta
+- Inicios de sesión en la banca digital
+
+**Importante:** esto es solo lectura. El bot nunca inicia sesión en la banca
+en línea ni ejecuta transferencias, compras o pagos — solo lee correos que el
+banco ya mandó, usando una **contraseña de aplicación de Gmail** (no tu
+contraseña normal), configurada en `.env`:
+
+```
+GMAIL_ADDRESS=tu_correo@gmail.com
+GMAIL_APP_PASSWORD=contraseña_de_aplicacion_de_16_caracteres
+REMITENTE_BANCO=notificaciones@bancocuscatlan.com
+```
+
+Generá la contraseña de aplicación en
+[myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords).
+Si tu banco es distinto o cambia el formato de sus correos, el parser de
+[banco.py](banco.py) hay que ajustarlo con un ejemplo real de la notificación.
+
 ## Próximos pasos posibles
 
 - Alertas de scraping (precios, disponibilidad de una web, etc.)
