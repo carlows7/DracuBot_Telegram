@@ -63,10 +63,10 @@ Como sigue corriendo en tu Mac, solo funciona mientras la compu esté prendida
 de tu compu hace falta un servidor en la nube (la mayoría pide tarjeta aunque
 te quedes en el nivel gratuito, ej. Fly.io).
 
-## Alertas de banco (solo lectura)
+## Alertas de banco (solo lectura, multi-banco)
 
 El bot vigila en tiempo real (IMAP IDLE, no consultas cada tanto) las
-notificaciones que Banco Cuscatlán manda por correo a Gmail, y te avisa por
+notificaciones que tus bancos mandan por correo a Gmail, y te avisa por
 Telegram casi al instante cuando detecta:
 
 - Depósitos recibidos
@@ -82,13 +82,23 @@ contraseña normal), configurada en `.env`:
 ```
 GMAIL_ADDRESS=tu_correo@gmail.com
 GMAIL_APP_PASSWORD=contraseña_de_aplicacion_de_16_caracteres
-REMITENTE_BANCO=notificaciones@bancocuscatlan.com
 ```
 
 Generá la contraseña de aplicación en
 [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords).
-Si tu banco es distinto o cambia el formato de sus correos, el parser de
-[banco.py](banco.py) hay que ajustarlo con un ejemplo real de la notificación.
+
+### Agregar un banco nuevo
+
+Cada banco es un adaptador independiente en [bancos/](bancos/). Hoy solo está
+[bancos/cuscatlan.py](bancos/cuscatlan.py). Para sumar otro:
+
+1. Copiá `bancos/cuscatlan.py` a un archivo nuevo (ej. `bancos/agricola.py`).
+2. Cambiá `REMITENTE` y `NOMBRE`, y ajustá `parsear()` con un ejemplo real de
+   una notificación de ese banco (pedímelo si necesitás ayuda armándolo).
+3. Importalo y agregalo a `MODULOS` en [bancos/\_\_init\_\_.py](bancos/__init__.py).
+
+El motor (`banco.py`) no necesita ningún cambio: detecta automáticamente de
+qué banco es cada correo según el remitente.
 
 ## Rachas y logros
 
@@ -111,8 +121,21 @@ python3 dashboard.py
 
 Después abrí [http://127.0.0.1:5050](http://127.0.0.1:5050) en el navegador.
 
+## Tests
+
+Suite de `pytest` (32 tests) que cubre el intérprete de fechas, la
+persistencia, el resumidor, el parser de bancos y la integridad del menú del
+bot. Corre sola en GitHub Actions en cada push (ver
+[.github/workflows/tests.yml](.github/workflows/tests.yml)), y también podés
+correrla localmente:
+
+```bash
+source venv/bin/activate
+pip install -r requirements-dev.txt
+pytest -v
+```
+
 ## Próximos pasos posibles
 
 - Alertas de scraping (precios, disponibilidad de una web, etc.)
-- Recordatorios recurrentes (todos los días a tal hora)
 - 24/7 real en la nube si en algún momento querés cargar una tarjeta (Fly.io) o migrar a un webhook serverless sin tarjeta (Cloudflare Workers)
