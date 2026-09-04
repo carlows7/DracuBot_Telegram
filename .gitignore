@@ -1,0 +1,7 @@
+venv/
+__pycache__/
+*.pyc
+.env
+recordatorios.db
+bot.log
+.DS_Store
