@@ -5,17 +5,31 @@ Nunca inicia sesión en la banca en línea ni ejecuta movimientos: solo lee
 correos que el banco ya mandó, usando IMAP con una contraseña de aplicación
 de Gmail (no la contraseña normal de la cuenta)."""
 
+import asyncio
 import email
 import imaplib
+import logging
 import os
 import re
+import ssl
+import threading
+import time
 from email.header import decode_header
 
+import certifi
 from bs4 import BeautifulSoup
+from imapclient import IMAPClient
+
+logger = logging.getLogger(__name__)
 
 GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
 REMITENTE_BANCO = os.getenv("REMITENTE_BANCO", "notificaciones@bancocuscatlan.com")
+
+# En algunas instalaciones de Python en macOS (python.org) el contexto SSL por
+# defecto no encuentra los certificados raíz del sistema; usamos el bundle de
+# certifi explícitamente para que la verificación TLS funcione siempre.
+_SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 IMAP_HOST = "imap.gmail.com"
 
@@ -170,3 +184,33 @@ def buscar_notificaciones_nuevas() -> list[dict]:
         conexion.logout()
 
     return notificaciones
+
+
+def vigilar_banco(en_nueva_notificacion, loop, detener: threading.Event | None = None):
+    """Corre en un hilo aparte (bloqueante): usa IMAP IDLE para enterarse al
+    instante cuando llega un correo nuevo del banco, en vez de consultar cada
+    tanto (polling). Cuando detecta algo, llama a `en_nueva_notificacion`
+    (una función async) en el loop de asyncio del bot."""
+    while detener is None or not detener.is_set():
+        try:
+            with IMAPClient(IMAP_HOST, ssl=True, ssl_context=_SSL_CONTEXT, timeout=30) as cliente:
+                cliente.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+                cliente.select_folder("INBOX")
+                logger.info("Vigilancia IMAP IDLE conectada")
+
+                while detener is None or not detener.is_set():
+                    cliente.idle()
+                    # Cada 5 minutos se corta el IDLE igual, para mantener la
+                    # conexión viva (buena práctica del protocolo IMAP).
+                    respuestas = cliente.idle_check(timeout=300)
+                    cliente.idle_done()
+
+                    if respuestas:
+                        notificaciones = buscar_notificaciones_nuevas()
+                        if notificaciones:
+                            asyncio.run_coroutine_threadsafe(
+                                en_nueva_notificacion(notificaciones), loop
+                            )
+        except Exception:
+            logger.exception("Se perdió la conexión IDLE con Gmail, reintentando en 30s")
+            time.sleep(30)
