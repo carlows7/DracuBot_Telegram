@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 import threading
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from html import escape
 
 from dotenv import load_dotenv
