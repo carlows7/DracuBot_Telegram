@@ -50,10 +50,31 @@ def _hora_desde_grupos(hora: str, minuto: str | None, calificador: str | None) -
     return h % 24, m
 
 
+def _extraer_sufijo_dia(mensaje: str) -> tuple[int | None, str]:
+    """Si el mensaje termina en 'hoy', 'mañana' o 'pasado mañana', lo separa y
+    devuelve cuántos días hay que sumar. Si no, devuelve (None, mensaje)."""
+    for frase, offset in (
+        ("pasado mañana", 2),
+        ("pasado manana", 2),
+        ("mañana", 1),
+        ("manana", 1),
+        ("hoy", 0),
+    ):
+        patron = re.compile(rf"\s+{re.escape(frase)}$", re.IGNORECASE)
+        match = patron.search(mensaje)
+        if match:
+            return offset, mensaje[: match.start()].strip()
+    return None, mensaje
+
+
 # Cada patrón intenta matchear al PRINCIPIO del texto. Lo que sigue después
 # del match se toma como el mensaje del recordatorio.
-_CALIF = r"(am|pm|de la mañana|de la manana|de la tarde|de la noche)?"
+_CALIF_OPCIONES = r"am|pm|de la mañana|de la manana|de la tarde|de la noche"
+_CALIF = rf"({_CALIF_OPCIONES})?"
 _HORA = rf"(\d{{1,2}})(?::(\d{{2}}))?\s*{_CALIF}"
+# Igual que _HORA pero con calificador OBLIGATORIO: sirve para reconocer una
+# hora "suelta" (sin "a las" adelante) sin confundirla con cualquier número.
+_HORA_CON_CALIF = rf"(\d{{1,2}})(?::(\d{{2}}))?\s*({_CALIF_OPCIONES})"
 
 PATRONES = [
     # "en 10 minutos", "en 2 horas", "en 1 día", "en una hora"
@@ -91,6 +112,8 @@ PATRONES = [
     (re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})\s+(\d{1,2}):(\d{2})\s+", re.IGNORECASE), "fecha_absoluta_vieja"),
     # "a las 20:30" (sin decir hoy/mañana: hoy si no pasó, si no mañana)
     (re.compile(rf"^a\s+las?\s+{_HORA}\s+", re.IGNORECASE), "solo_hora"),
+    # Hora suelta con calificador, sin "a las": "8pm", "8:30pm", "1 de la tarde"
+    (re.compile(rf"^{_HORA_CON_CALIF}\s+", re.IGNORECASE), "solo_hora"),
     # Compatibilidad con el formato viejo: "10m", "2h", "1d"
     (re.compile(r"^(\d+)([mhd])\s+", re.IGNORECASE), "relativo_viejo"),
     # Compatibilidad con el formato viejo: "20:30" suelto
@@ -187,6 +210,15 @@ def interpretar_recordatorio(texto: str) -> tuple[datetime | None, str]:
         if tipo == "solo_hora":
             hora, minuto, calif = match.groups()
             h, m = _hora_desde_grupos(hora, minuto, calif)
+
+            offset, mensaje_limpio = _extraer_sufijo_dia(mensaje)
+            if offset is not None:
+                # Dijo explícitamente "hoy"/"mañana"/"pasado mañana" al final.
+                fecha = (ahora + timedelta(days=offset)).replace(
+                    hour=h, minute=m, second=0, microsecond=0
+                )
+                return fecha, mensaje_limpio
+
             fecha = ahora.replace(hour=h, minute=m, second=0, microsecond=0)
             if fecha <= ahora:
                 fecha += timedelta(days=1)

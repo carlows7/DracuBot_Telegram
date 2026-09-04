@@ -48,12 +48,14 @@ CATEGORIAS = {
 # Texto de uso/ejemplo que se muestra al elegir un comando puntual.
 USO_COMANDOS = {
     "recordar": (
-        "/recordar <cuándo> <mensaje> - invoca un recordatorio\n"
+        "/recordar <cuándo> <mensaje> - invoca un recordatorio (también: /agenda)\n"
         "ej: /recordar mañana a las 3 llamar al banco\n"
         "ej: /recordar en 10 minutos sacar la comida del horno\n"
         "ej: /recordar hoy a las 20:30 tomar la pastilla\n"
         "ej: /recordar el viernes a las 18 reunión\n"
-        "ej: /recordar 13 de octubre caminata por Michoacán"
+        "ej: /recordar 13 de octubre caminata por Michoacán\n"
+        "ej: /agenda 8pm gimnasio hoy\n"
+        "ej: /agenda 1 de la tarde almuerzo mañana"
     ),
     "lista": "/lista - revela tus recordatorios pendientes",
     "borrar": "/borrar <id> - destierra un recordatorio",
@@ -91,7 +93,9 @@ PEDIDO_DATOS = {
         "ej: en 10 minutos sacar la comida del horno\n"
         "ej: hoy a las 20:30 tomar la pastilla\n"
         "ej: el viernes a las 18 reunión\n"
-        "ej: 13 de octubre caminata por Michoacán"
+        "ej: 13 de octubre caminata por Michoacán\n"
+        "ej: 8pm gimnasio hoy\n"
+        "ej: 1 de la tarde almuerzo mañana"
     ),
     "borrar": "✍️ Escribime el id del recordatorio a borrar\nej: 3",
     "gasto": "✍️ Escribime <monto> <descripción>\nej: 500 supermercado",
@@ -251,12 +255,14 @@ def programar_job(app: Application, recordatorio_id: int, chat_id: int, mensaje:
 async def recordar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
-            "Uso: /recordar <cuándo> <mensaje>\n"
+            "Uso: /recordar <cuándo> <mensaje> (también: /agenda)\n"
             "ej: /recordar mañana a las 3 llamar al banco\n"
             "ej: /recordar en 10 minutos sacar la comida del horno\n"
             "ej: /recordar el viernes a las 18 reunión\n"
             "ej: /recordar hoy a las 20:30 tomar la pastilla\n"
-            "ej: /recordar 13 de octubre caminata por Michoacán"
+            "ej: /recordar 13 de octubre caminata por Michoacán\n"
+            "ej: /agenda 8pm gimnasio hoy\n"
+            "ej: /agenda 1 de la tarde almuerzo mañana"
         )
         return
 
@@ -677,6 +683,7 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("recordar", recordar))
+    app.add_handler(CommandHandler("agenda", recordar))  # alias de /recordar
     app.add_handler(CommandHandler("lista", lista))
     app.add_handler(CommandHandler("borrar", borrar))
     app.add_handler(CommandHandler("gasto", gasto))
