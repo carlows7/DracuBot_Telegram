@@ -1,12 +1,14 @@
 name: bot-poll
 
-# GitHub avisa que los horarios programados pueden demorarse o incluso
-# saltarse una corrida en momentos de mucha carga en su plataforma — esto
-# no es un cron confiable al segundo, es "lo más seguido que se puede sin
-# pagar por un servidor".
+# El "schedule" quedó desactivado a propósito: en la práctica, GitHub no lo
+# disparaba solo (llegó a pasar más de 4 horas sin ni una corrida automática,
+# sin ningún error ni aviso — es un problema real y conocido del "schedule"
+# nativo de Actions en repos con poca actividad, no algo que se arregle
+# desde acá). Por ahora el bot vuelve a correr en la Mac vía launchd
+# (ver README), y este workflow queda solo para probarlo a mano
+# (workflow_dispatch) o para retomarlo el día que se resuelva lo del
+# disparador automático (ej. un cron externo que llame a este workflow).
 on:
-  schedule:
-    - cron: "*/5 * * * *"
   workflow_dispatch: {} # para poder probarlo manualmente desde GitHub
 
 # Evita que dos corridas se pisen si una se atrasa y se solapa con la

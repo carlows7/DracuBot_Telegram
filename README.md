@@ -135,36 +135,28 @@ pip install -r requirements-dev.txt
 pytest -v
 ```
 
-## 24/7 sin depender de tu Mac (GitHub Actions, sin tarjeta)
+## 24/7 sin depender de tu Mac (intentado con GitHub Actions — no confiable)
 
-Como alternativa al LaunchAgent de macOS, el bot puede correr **una pasada
-cada 5 minutos** en GitHub Actions — gratis, sin tarjeta, pero con estas
-limitaciones reales (ver [poll_once.py](poll_once.py)):
+Se probó correr el bot como **una pasada cada 5 minutos** en GitHub Actions
+(gratis, sin tarjeta) en vez del LaunchAgent — ver [poll_once.py](poll_once.py)
+y [.github/workflows/poll.yml](.github/workflows/poll.yml). El disparo manual
+(`workflow_dispatch`) funciona perfecto: procesa Telegram, revisa el banco,
+manda recordatorios y avisos diarios, y guarda los datos en un repo privado
+aparte (`dracubot-datos`, para no exponer gastos/recordatorios en este repo
+público).
 
-- No hay IMAP IDLE: el correo del banco se revisa una vez por corrida, no al
-  instante.
-- Los horarios de GitHub Actions no son exactos: pueden demorarse o
-  saltearse una corrida si la plataforma está muy cargada.
-- Los datos (`recordatorios.db`) viven en un **repo privado aparte**, para no
-  exponer tus gastos/recordatorios en este repo público.
+**El problema:** el disparador automático (`schedule: cron`) de GitHub
+Actions resultó no ser confiable — llegó a pasar **más de 4 horas sin
+disparar ni una sola vez**, sin ningún error visible. Es un problema conocido
+del `schedule` nativo en repos con poca actividad, no algo que se arregle
+con más configuración. Por eso el `schedule` quedó comentado en
+`poll.yml`, y **el bot volvió a correr en la Mac vía LaunchAgent** (ver más
+arriba), que sí es instantáneo y confiable.
 
-### Setup
-
-1. **Creá un repo nuevo, privado** (ej. `DracuBot-datos`) — marcá la opción
-   de agregar un README para que tenga al menos un commit.
-2. **Generá un token de acceso** en
-   [github.com/settings/tokens](https://github.com/settings/tokens) (fine-grained,
-   con permiso de escritura de "Contents" solo sobre ese repo).
-3. En **este repo** (`DracuBot_Telegram`) → Settings → Secrets and variables →
-   Actions → agregá estos secrets:
-   - `TELEGRAM_BOT_TOKEN`, `GMAIL_ADDRESS`, `GMAIL_APP_PASSWORD` (los mismos
-     valores que tenés en tu `.env`)
-   - `DATOS_REPO` → `tu_usuario/DracuBot-datos`
-   - `DATOS_REPO_TOKEN` → el token del paso 2
-4. **Apagá el LaunchAgent de tu Mac** (`launchctl bootout gui/$(id -u)/com.openclawt.draculabot`)
-   para que no compitan los dos por el mismo bot de Telegram al mismo tiempo.
-5. Probalo manualmente desde la pestaña **Actions** de este repo → workflow
-   `bot-poll` → "Run workflow", antes de esperar a que corra solo.
+Si en algún momento se quiere retomar esto sin depender de la Mac, el
+camino sería agregar un disparador **externo** (ej. un servicio gratuito
+tipo cron-job.org que le pegue a la API de GitHub cada 5 minutos para forzar
+el `workflow_dispatch`), en vez de confiar en el `schedule` nativo.
 
 ## Próximos pasos posibles
 
