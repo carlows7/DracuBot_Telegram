@@ -17,7 +17,7 @@ import ssl
 import threading
 import time
 from email.header import decode_header
-from email.utils import parseaddr
+from email.utils import parseaddr, parsedate_to_datetime
 
 import certifi
 from bs4 import BeautifulSoup
@@ -98,6 +98,44 @@ def _criterio_busqueda() -> str:
     return f"(UNSEEN {criterio})"
 
 
+def _parsear_mensaje(mensaje, adaptador) -> dict:
+    """Parsea un correo y le agrega lo que identifica al aviso (id del correo
+    y su fecha), para poder guardarlo en el registro de movimientos sin duplicar."""
+    asunto = _decodificar(mensaje.get("Subject"))
+    cuerpo = _cuerpo_texto_plano(mensaje)
+    notificacion = adaptador.parsear(asunto, cuerpo)
+    notificacion["message_id"] = (mensaje.get("Message-ID") or "").strip() or None
+    try:
+        notificacion["fecha_correo"] = parsedate_to_datetime(mensaje["Date"]).date().isoformat()
+    except (TypeError, ValueError):
+        notificacion["fecha_correo"] = None
+    return notificacion
+
+
+def leer_historial():
+    """Recorre TODOS los correos de los bancos registrados (no solo los no
+    leídos) y los va entregando ya parseados. Es de solo lectura: abre la
+    carpeta en modo readonly y usa BODY.PEEK, así que no marca nada como leído.
+    Sirve para cargar el historial de movimientos una sola vez."""
+    conexion = imaplib.IMAP4_SSL(IMAP_HOST, timeout=60)
+    try:
+        conexion.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+        conexion.select("INBOX", readonly=True)
+        _, datos = conexion.search(None, _criterio_busqueda().replace("UNSEEN ", "", 1))
+        for id_correo in datos[0].split():
+            _, datos_msj = conexion.fetch(id_correo, "(BODY.PEEK[])")
+            mensaje = email.message_from_bytes(datos_msj[0][1])
+            _, direccion = parseaddr(mensaje.get("From", ""))
+            adaptador = bancos.adaptador_para(direccion)
+            if adaptador is not None:
+                yield _parsear_mensaje(mensaje, adaptador)
+    finally:
+        try:
+            conexion.logout()
+        except imaplib.IMAP4.error:
+            pass
+
+
 def buscar_notificaciones_nuevas() -> list[dict]:
     """Busca correos no leídos de cualquier banco registrado, los parsea con
     el adaptador que corresponda y los marca como leídos. Devuelve una lista
@@ -121,9 +159,7 @@ def buscar_notificaciones_nuevas() -> list[dict]:
             _, direccion = parseaddr(mensaje.get("From", ""))
             adaptador = bancos.adaptador_para(direccion)
             if adaptador is not None:
-                asunto = _decodificar(mensaje.get("Subject"))
-                cuerpo = _cuerpo_texto_plano(mensaje)
-                notificaciones.append(adaptador.parsear(asunto, cuerpo))
+                notificaciones.append(_parsear_mensaje(mensaje, adaptador))
 
             conexion.store(id_correo, "+FLAGS", "\\Seen")
     finally:

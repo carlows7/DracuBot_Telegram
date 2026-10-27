@@ -84,6 +84,10 @@ async def _procesar_jobs_diarios(app: Application):
         await bot.resumen_matutino(contexto)
         storage.marcar_enviado_hoy("resumen_matutino", hoy)
 
+    if ahora.hour == 23 and not storage.ya_se_mando_hoy("resumen_mensual_banco", hoy):
+        await bot.resumen_mensual_banco(contexto)
+        storage.marcar_enviado_hoy("resumen_mensual_banco", hoy)
+
     if ahora.hour == 22 and not storage.ya_se_mando_hoy("aviso_nocturno", hoy):
         await bot.aviso_nocturno(contexto)
         storage.marcar_enviado_hoy("aviso_nocturno", hoy)

@@ -20,7 +20,7 @@ import pytest
 
 import storage
 
-TABLAS = ("recordatorios", "gastos", "logros", "chats", "estado", "eventos_diarios")
+TABLAS = ("recordatorios", "gastos", "logros", "chats", "estado", "eventos_diarios", "movimientos")
 
 
 @pytest.fixture(autouse=True)

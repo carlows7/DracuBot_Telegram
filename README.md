@@ -29,6 +29,18 @@ Bot de Telegram para recordatorios y agenda personal.
   - Fecha y hora exacta: `05/09/2026 14:00`
 - `/lista` - recordatorios pendientes
 - `/borrar <id>` - elimina un recordatorio
+- `/mes [anterior | septiembre | 09/2026]` - lo que entró y salió de tu cuenta en ese mes, leído solo de los avisos del banco (sin anotar nada a mano)
+
+## Resumen del banco
+
+Cada aviso del banco que llega al Gmail se guarda como movimiento (solo monto, fecha y tipo).
+Un mismo movimiento llega en varios correos, así que los totales se consolidan en vez de sumar
+todos los avisos. El último día de cada mes a las 23:00 el bot manda solo el recuento.
+
+- En `.env` poné `CUENTAS_PROPIAS=8878=tunombre` (últimos 4 dígitos + una palabra de tu nombre).
+  Sin eso se cuentan todas las cuentas de las que lleguen avisos.
+- Para cargar los meses anteriores desde los correos que ya tenés (una vez, solo lectura):
+  `python3 importar_historial.py`
 
 Los recordatorios se guardan en `recordatorios.db` (SQLite) y se reprograman
 automáticamente si reiniciás el bot.

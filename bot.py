@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import re
 import threading
 from datetime import datetime, time, timedelta
 from html import escape
@@ -24,6 +25,7 @@ from telegram.ext import (
     filters,
 )
 
+import movimientos
 import storage
 from banco import vigilar_banco
 from frases import obtener_frase_random
@@ -43,6 +45,7 @@ CATEGORIAS = {
     "agenda": ("🗓️ AgendaDrac", ["recordar", "lista", "borrar", "editar"]),
     "gastos": ("🩸 OrganizadorGastos", ["gasto", "extra", "gastos", "duplicados", "limpiar", "ahorro", "racha", "editar"]),
     "resumenes": ("📜 ResumenesDrac", ["resumen"]),
+    "banco": ("🏦 CuentaBanco", ["mes"]),
 }
 
 # Texto de uso/ejemplo que se muestra al elegir un comando puntual.
@@ -83,6 +86,13 @@ USO_COMANDOS = {
     ),
     "ahorro": "/ahorro - meta de ahorro sugerida según tu historial",
     "racha": "/racha - racha de días seguidos anotando gastos y logros desbloqueados",
+    "mes": (
+        "/mes - lo que entró y salió de tu cuenta este mes, leído de los avisos del banco\n"
+        "ej: /mes anterior\n"
+        "ej: /mes septiembre\n"
+        "ej: /mes 09/2026\n"
+        "(además te mando el recuento solo, el último día de cada mes)"
+    ),
     "resumen": (
         "/resumen <texto, link o tema> - resume un texto, una página web o busca un tema\n"
         "ej: /resumen la primera guerra mundial"
@@ -90,7 +100,7 @@ USO_COMANDOS = {
 }
 
 # Comandos que no necesitan datos: se ejecutan directo al tocar el botón.
-COMANDOS_SIN_DATOS = {"lista", "gastos", "ahorro", "duplicados", "racha"}
+COMANDOS_SIN_DATOS = {"lista", "gastos", "ahorro", "duplicados", "racha", "mes"}
 
 # Para los comandos que sí necesitan datos: qué pedirle al usuario que escriba
 # (sin la barra "/", porque la respuesta se manda como mensaje de texto normal).
@@ -709,6 +719,56 @@ async def resumen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def interpretar_mes(args: list[str], ahora: datetime) -> tuple[int, int] | None:
+    """'' -> mes actual; 'anterior'; 'septiembre' [2026]; '09/2026' o '9-2026'."""
+    texto = " ".join(args).strip().lower()
+    if not texto:
+        return ahora.year, ahora.month
+    if texto in ("anterior", "pasado", "mes pasado"):
+        previo = ahora.replace(day=1) - timedelta(days=1)
+        return previo.year, previo.month
+    m = re.fullmatch(r"(\d{1,2})[/-](\d{4})", texto)
+    if m and 1 <= int(m[1]) <= 12:
+        return int(m[2]), int(m[1])
+    m = re.fullmatch(r"([a-záéíóú]+)(?:\s+(?:de\s+)?(\d{4}))?", texto)
+    if m:
+        nombre = m[1].replace("setiembre", "septiembre")
+        if nombre in movimientos.MESES_NOMBRES:
+            mes = movimientos.MESES_NOMBRES.index(nombre) + 1
+            if m[2]:
+                return int(m[2]), mes
+            # Sin año: el más reciente que no sea futuro.
+            return (ahora.year if mes <= ahora.month else ahora.year - 1), mes
+    return None
+
+
+def texto_resumen_banco(anio: int, mes: int) -> str:
+    cuentas = movimientos.cuentas_propias()
+    r = movimientos.consolidar(storage.movimientos_del_mes(anio, mes), cuentas)
+    return movimientos.formatear_resumen(anio, mes, r, cuentas)
+
+
+async def mes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    periodo = interpretar_mes(context.args or [], ahora_local())
+    if periodo is None:
+        await update.message.reply_text(
+            "🦇 No entendí el mes. Probá: /mes, /mes anterior, /mes septiembre o /mes 09/2026"
+        )
+        return
+    await update.message.reply_text(texto_resumen_banco(*periodo))
+
+
+async def resumen_mensual_banco(context: ContextTypes.DEFAULT_TYPE):
+    """Recuento automático: se manda el último día de cada mes (el job corre
+    todos los días a las 23:00 y solo actúa si mañana ya es otro mes)."""
+    ahora = ahora_local()
+    if (ahora + timedelta(days=1)).day != 1:
+        return
+    texto = "🧛 Cierre de mes\n\n" + texto_resumen_banco(ahora.year, ahora.month)
+    for chat_id in storage.listar_chats():
+        await context.bot.send_message(chat_id=chat_id, text=texto)
+
+
 async def resumen_matutino(context: ContextTypes.DEFAULT_TYPE):
     ahora = ahora_local()
     for chat_id in storage.listar_chats():
@@ -751,6 +811,10 @@ TITULOS_MOVIMIENTO = {
     "deposito_recibido": "🩸 Depósito recibido",
     "transferencia_enviada": "🩸 Transferencia enviada",
     "compra": "🛒 Compra con tarjeta",
+    "credito_recibido": "📥 Dinero recibido en tu cuenta",
+    "debito_cuenta": "📤 Cargo a tu cuenta",
+    "transferencia_proceso": "⏳ Transferencia en proceso",
+    "transferencia_rechazada": "⚠️ Transferencia rechazada",
     "retiro_sin_tarjeta": "🏧 Código de retiro sin tarjeta",
     "inicio_sesion": "🔓 Inicio de sesión en tu banca",
     "otro": "🦇 Movimiento bancario",
@@ -764,13 +828,18 @@ def _formatear_notificacion(n: dict) -> str:
         titulo += f" — {n['banco']}"
     lineas = [titulo]
 
-    if tipo in ("deposito_recibido", "transferencia_enviada"):
+    if tipo in (
+        "deposito_recibido", "transferencia_enviada", "credito_recibido",
+        "debito_cuenta", "transferencia_proceso", "transferencia_rechazada",
+    ):
         if n.get("monto"):
             lineas.append(f"Monto: {n['monto']}")
         if n.get("contraparte"):
             lineas.append(f"Con: {n['contraparte']}")
         if n.get("banco_contraparte"):
             lineas.append(f"Banco: {n['banco_contraparte']}")
+        if n.get("cuenta") and tipo != "deposito_recibido":
+            lineas.append(f"Cuenta: {n['cuenta']}")
         if n.get("fecha_hora"):
             lineas.append(f"Fecha: {n['fecha_hora']}")
         if n.get("referencia"):
@@ -810,6 +879,15 @@ def _formatear_notificacion(n: dict) -> str:
 async def procesar_notificaciones_banco(bot, notificaciones: list[dict]):
     # Llamada desde el hilo de vigilancia IMAP IDLE (ver banco.vigilar_banco),
     # vía asyncio.run_coroutine_threadsafe, apenas llega un correo nuevo del banco.
+    # Primero se guarda cada movimiento (alimenta /mes y el cierre de mes); si
+    # falla, igual se avisa por Telegram como siempre.
+    for n in notificaciones:
+        try:
+            aviso = movimientos.extraer(n)
+            if aviso:
+                storage.guardar_movimiento(aviso)
+        except Exception:
+            logger.exception("No se pudo guardar el movimiento del banco")
     for chat_id in storage.listar_chats():
         for n in notificaciones:
             await bot.send_message(chat_id=chat_id, text=_formatear_notificacion(n))
@@ -855,6 +933,7 @@ def registrar_handlers(app: Application):
     app.add_handler(CommandHandler("ahorro", ahorro))
     app.add_handler(CommandHandler("racha", racha))
     app.add_handler(CommandHandler("resumen", resumen))
+    app.add_handler(CommandHandler("mes", mes))
     app.add_handler(CallbackQueryHandler(menu_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_respuesta_menu))
 
@@ -877,6 +956,9 @@ def main():
     )
     app.job_queue.run_daily(
         aviso_nocturno, time=time(hour=22, minute=0, tzinfo=ahora_local().tzinfo)
+    )
+    app.job_queue.run_daily(
+        resumen_mensual_banco, time=time(hour=23, minute=0, tzinfo=ahora_local().tzinfo)
     )
 
     # IMAP IDLE necesita un loop de asyncio ya creado para poder mandar mensajes

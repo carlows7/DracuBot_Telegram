@@ -95,6 +95,23 @@ def inicializar_db():
             )
             """
         )
+        # Un aviso del banco por fila (message_id evita guardar el mismo correo
+        # dos veces). Ver movimientos.py para cómo se consolidan los duplicados.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS movimientos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id TEXT NOT NULL UNIQUE,
+                fuente TEXT NOT NULL,
+                direccion TEXT NOT NULL,
+                cuenta TEXT,
+                titular TEXT,
+                fecha TEXT NOT NULL,
+                monto REAL,
+                banco_contraparte TEXT
+            )
+            """
+        )
 
 
 def crear_recordatorio(chat_id: int, mensaje: str, fecha_hora: datetime) -> int:
@@ -392,3 +409,25 @@ def marcar_enviado_hoy(evento: str, fecha: str):
         conn.execute(
             "INSERT OR IGNORE INTO eventos_diarios (evento, fecha) VALUES (?, ?)", (evento, fecha)
         )
+
+
+def guardar_movimiento(m: dict) -> bool:
+    """Guarda un aviso de movimiento. Devuelve False si ese correo ya estaba."""
+    with conectar() as conn:
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO movimientos
+                (message_id, fuente, direccion, cuenta, titular, fecha, monto, banco_contraparte)
+            VALUES (:message_id, :fuente, :direccion, :cuenta, :titular, :fecha, :monto, :banco_contraparte)
+            """,
+            m,
+        )
+        return cursor.rowcount > 0
+
+
+def movimientos_del_mes(anio: int, mes: int) -> list[sqlite3.Row]:
+    with conectar() as conn:
+        return conn.execute(
+            "SELECT * FROM movimientos WHERE fecha LIKE ? ORDER BY fecha",
+            (f"{anio:04d}-{mes:02d}-%",),
+        ).fetchall()
